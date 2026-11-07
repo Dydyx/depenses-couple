@@ -1,0 +1,35 @@
+# Empêche la mise en pause automatique du projet Supabase gratuit
+# (pause après ~7 jours sans activité) en l'interrogeant tous les 3 jours.
+name: Supabase keep-alive
+
+on:
+  schedule:
+    - cron: "17 6 */3 * *"   # tous les 3 jours à 06:17 UTC
+  workflow_dispatch:          # lancement manuel possible depuis l'onglet Actions
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Interroger la base Supabase
+        run: |
+          URL=$(grep -oP 'supabaseUrl:\s*"\K[^"]+' config.js)
+          KEY=$(grep -oP 'supabaseKey:\s*"\K[^"]+' config.js)
+          if [ -z "$URL" ] || [ -z "$KEY" ]; then echo "Supabase non configuré dans config.js"; exit 1; fi
+          code=$(curl -sS -o resp.txt -w '%{http_code}' -X POST "$URL/rest/v1/rpc/app_ping" \
+            -H "apikey: $KEY" -H "Content-Type: application/json" -d '{}')
+          echo "HTTP $code : $(cat resp.txt)"
+          test "$code" = "200"
+
+      # GitHub désactive les tâches planifiées d'un dépôt public après 60 jours sans activité.
+      # Réactiver le workflow via l'API remet ce compteur à zéro, sans créer de commit.
+      - name: Garder la tâche planifiée active
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/keepalive.yml/enable"

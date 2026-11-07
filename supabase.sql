@@ -87,3 +87,17 @@ grant execute on function public.app_save(text, text, jsonb) to anon, authentica
 --   set pwd_hash = extensions.crypt('NOUVEAU', extensions.gen_salt('bf'))
 --   where id = 1;
 -- -------------------------------------------------------------
+
+-- -------------------------------------------------------------
+-- Fonction de « ping » appelée tous les 3 jours par GitHub Actions
+-- (.github/workflows/keepalive.yml) pour éviter la mise en pause
+-- du projet gratuit. Ne renvoie aucune donnée.
+-- -------------------------------------------------------------
+create or replace function public.app_ping()
+returns boolean
+language sql stable security definer set search_path = ''
+as $$
+  select count(*) >= 0 from public.app_data;
+$$;
+revoke all on function public.app_ping() from public;
+grant execute on function public.app_ping() to anon, authenticated;

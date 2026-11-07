@@ -10,20 +10,31 @@
   const LOCAL_PASSWORD_SHA256 = '110812f67fa1e1f0117f6f3d70241c1a42a7b07711a93c2477cc516d9042f9db';
   const LS_DATA = 'depenses-couple:data:v1';
   const LS_TAB = 'depenses-couple:tab';
+  const LS_MODE = 'depenses-couple:annualMode';
   const SS_PWD = 'depenses-couple:session';
   const LISTS = ['dyd', 'meg', 'couple'];
   const WHO = { dyd: 'Dyd', meg: 'Meg' };
   const TAB_LABEL = { dyd: 'Dépenses Dyd', meg: 'Dépenses Meg', couple: 'Dépenses du couple' };
   const JOUR_LABEL = 'Le ... du mois';
+  const DATE_LABEL = 'Le ... (JJ/MM)';
+  const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
   /* =========================================================
    * État
    * ========================================================= */
+  // Dépense : { id, motif, cents, freq: 'm' (mensuelle) | 'a' (annuelle), jour, mois }
   const state = { dyd: [], meg: [], couple: [], settings: { partDyd: 50 } };
+  const emptyFilters = () => ({ motif: '', mOp: 'eq', m: '', jOp: 'eq', j: '' });
   const ui = {};
   LISTS.forEach((k) => {
-    ui[k] = { sortBy: '', sortDir: 1, f: { motif: '', mOp: 'eq', m: '', jOp: 'eq', j: '' }, editing: null };
+    ui[k] = { sortBy: '', sortDir: 1, f: emptyFilters(), editing: null, formType: 'm' };
   });
+  // Affichage des dépenses annuelles : 'lisser' (÷ 12 dans le tableau mensuel) ou 'separe'
+  let annualMode = 'lisser';
+  try {
+    const m = localStorage.getItem(LS_MODE);
+    if (m === 'lisser' || m === 'separe') annualMode = m;
+  } catch (_) { /* indisponible */ }
   let password = null;
   let activeTab = 'dyd';
 
@@ -37,7 +48,9 @@
   const pct = (p) => String(p).replace('.', ',') + '%';
   const shareText = (p) => pct(p) + '/' + pct(100 - p);
   const partOf = (cents, p) => Math.round((cents * p) / 100);
-  const sum = (list) => list.reduce((s, e) => s + e.cents, 0);
+  const smooth = (cents) => Math.round(cents / 12);
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const dateText = (j, m) => pad2(j) + '/' + pad2(m);
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const norm = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
   const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
@@ -61,11 +74,36 @@
     const n = Number(s);
     return n >= 1 && n <= 31 ? { ok: true, value: n } : { ok: false };
   }
+  // Date annuelle JJ/MM complète (vide = pas de date)
+  function parseDate(str) {
+    const s = String(str).trim();
+    if (s === '') return { ok: true, jour: null, mois: null };
+    const m = /^(\d{1,2})\/(\d{1,2})$/.exec(s);
+    if (!m) return { ok: false };
+    const jour = Number(m[1]);
+    const mois = Number(m[2]);
+    if (mois < 1 || mois > 12 || jour < 1 || jour > DAYS_IN_MONTH[mois - 1]) return { ok: false };
+    return { ok: true, jour, mois };
+  }
+  // Date JJ/MM en cours de frappe (début valide d'une date)
+  function isPartialDate(s) {
+    const m = /^(\d{0,2})(\/(\d{0,2}))?$/.exec(s);
+    if (!m) return false;
+    const d = m[1];
+    const hasSlash = Boolean(m[2]);
+    const mo = m[3] || '';
+    if (hasSlash && (d === '' || Number(d) === 0)) return false;
+    if (d.length === 2 && (Number(d) < 1 || Number(d) > 31)) return false;
+    if (mo.length === 2 && (Number(mo) < 1 || Number(mo) > 12)) return false;
+    if (mo.length === 2 && Number(d) > DAYS_IN_MONTH[Number(mo) - 1]) return false;
+    return true;
+  }
   const validPart = (p) => {
     const n = Number(p);
     if (!Number.isFinite(n) || n < 0 || n > 100) return null;
     return Math.round(n * 2) / 2;
   };
+  const present = (v) => v !== null && v !== undefined && v !== '';
 
   // Nettoie / valide une dépense (données importées ou chargées)
   function cleanEntry(e, keepId) {
@@ -79,14 +117,27 @@
       if (Math.abs(c - Math.round(c)) < 1e-6 && c > 0) cents = Math.round(c);
     } else if (typeof e.montant === 'string') cents = parseMontant(e.montant);
     if (!cents) return null;
+
+    const freq = e.freq === 'a' || e.type === 'annuelle' ? 'a' : 'm';
     let jour = null;
-    if (e.jour !== null && e.jour !== undefined && e.jour !== '') {
-      const j = parseJour(String(e.jour));
-      if (!j.ok) return null;
-      jour = j.value;
+    let mois = null;
+    if (freq === 'm') {
+      if (present(e.jour)) {
+        const j = parseJour(String(e.jour));
+        if (!j.ok) return null;
+        jour = j.value;
+      }
+    } else {
+      let raw = '';
+      if (typeof e.date === 'string') raw = e.date.trim();
+      else if (present(e.jour) && present(e.mois)) raw = `${e.jour}/${e.mois}`;
+      const d = parseDate(raw);
+      if (!d.ok) return null;
+      jour = d.jour;
+      mois = d.mois;
     }
     const id = keepId && typeof e.id === 'string' && e.id ? e.id : uid();
-    return { id, motif, cents, jour };
+    return { id, motif, cents, freq, jour, mois };
   }
 
   function applyData(data) {
@@ -103,6 +154,13 @@
     return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
   }
 
+  function revert(input, v) {
+    const last = input.dataset.last || '';
+    const pos = Math.max(0, (input.selectionStart ?? v.length) - (v.length - last.length));
+    input.value = last;
+    try { input.setSelectionRange(pos, pos); } catch (_) { /* type non supporté */ }
+  }
+
   // Restreint la saisie d'un champ à une expression régulière
   function restrict(input, re) {
     input.dataset.last = input.value;
@@ -117,10 +175,33 @@
         input.dataset.last = v;
         return;
       }
-      const last = input.dataset.last || '';
-      const pos = Math.max(0, (input.selectionStart ?? v.length) - (v.length - last.length));
-      input.value = last;
-      try { input.setSelectionRange(pos, pos); } catch (_) { /* type non supporté */ }
+      revert(input, v);
+    });
+  }
+
+  // 3e champ du formulaire : jour du mois (1-31) ou date JJ/MM avec « / » automatique
+  function attachDayOrDate(input, getType) {
+    input.dataset.last = input.value;
+    input.addEventListener('input', (ev) => {
+      let v = input.value.replace(/[\s  ]/g, '');
+      if (getType() === 'm') {
+        if (RE_JOUR.test(v)) { input.value = v; input.dataset.last = v; } else revert(input, v);
+        return;
+      }
+      const inserting = !ev.inputType || ev.inputType.startsWith('insert');
+      v = v.replace(/[.\-]/g, '/');
+      if (/^\d{3,4}$/.test(v)) v = v.slice(0, 2) + '/' + v.slice(2);
+      if (inserting) {
+        if (/^[4-9]$/.test(v)) v = '0' + v + '/';           // 4 → 04/
+        else if (/^\d{2}$/.test(v)) v += '/';                // 13 → 13/
+        else if (/^\d\/$/.test(v)) v = '0' + v;              // 5/ → 05/
+        else if (/^\d{2}\/[2-9]$/.test(v)) v = v.slice(0, 3) + '0' + v.slice(3); // 13/4 → 13/04
+      }
+      if (isPartialDate(v)) {
+        input.value = v;
+        input.dataset.last = v;
+        try { input.setSelectionRange(v.length, v.length); } catch (_) { /* */ }
+      } else revert(input, v);
     });
   }
   function setVal(input, v) { input.value = v; input.dataset.last = v; }
@@ -137,7 +218,7 @@
     async rpc(fn, body) {
       const headers = { 'Content-Type': 'application/json', apikey: CFG.supabaseKey };
       if (!String(CFG.supabaseKey).startsWith('sb_')) headers.Authorization = 'Bearer ' + CFG.supabaseKey;
-      const res = await fetch(String(CFG.supabaseUrl).replace(/\/+$/, '') + '/rest/v1/rpc/' + fn, {
+      const res = await fetch(String(CFG.supabaseUrl).replace(/\/+$/, '').replace(/\/rest\/v1$/, '') + '/rest/v1/rpc/' + fn, {
         method: 'POST', headers, body: JSON.stringify(body), cache: 'no-store'
       });
       if (!res.ok) {
@@ -234,6 +315,24 @@
   const ICON_EDIT = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
   const ICON_DEL = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>';
 
+  function tableHTML(k, kind) {
+    const couple = k === 'couple';
+    return `
+      <div class="table-wrap">
+        <table class="expenses" data-kind="${kind}">
+          <thead><tr>
+            <th><button type="button" class="th-sort" data-col="motif">Motif<span class="arrow"></span></button></th>
+            <th class="num"><button type="button" class="th-sort" data-col="montant">Montant<span class="arrow"></span></button></th>
+            <th class="num"><button type="button" class="th-sort" data-col="jour">${kind === 'a' ? 'Le' : JOUR_LABEL}<span class="arrow"></span></button></th>
+            ${couple ? '<th class="num">Part Dyd</th><th class="num">Part Meg</th>' : ''}
+            <th class="act"><span class="sr">Actions</span></th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="filtered-total" data-ft="${kind}" hidden></p>`;
+  }
+
   function panelHTML(k) {
     const couple = k === 'couple';
     const opSelect = (name, label) => `<select data-f="${name}" aria-label="${label}"><option value="eq">=</option><option value="gte">≥</option><option value="lte">≤</option></select>`;
@@ -258,7 +357,11 @@
           ${share}
           <div class="main-col">
             <form class="card entry" novalidate autocomplete="off">
-              <h2 class="entry-title">Nouvelle dépense</h2>
+              <h2 class="entry-title" hidden>Modifier la dépense</h2>
+              <div class="type-switch" role="group" aria-label="Type de dépense">
+                <button type="button" data-type="m" aria-pressed="true">Nouvelle dépense mensuelle</button>
+                <button type="button" data-type="a" aria-pressed="false">Nouvelle dépense annuelle</button>
+              </div>
               <div class="fields">
                 <label class="field f-motif"><span>Motif <i>*</i></span>
                   <input name="motif" maxlength="100" required enterkeyhint="next">
@@ -267,7 +370,7 @@
                 <label class="field"><span>Montant <i>*</i></span>
                   <span class="suffix"><input name="montant" inputmode="decimal" required placeholder="0,00" enterkeyhint="next"><em>€</em></span>
                 </label>
-                <label class="field"><span>${JOUR_LABEL}</span>
+                <label class="field"><span class="jour-label">${JOUR_LABEL}</span>
                   <input name="jour" inputmode="numeric" placeholder="1 à 31" enterkeyhint="done">
                 </label>
               </div>
@@ -280,7 +383,7 @@
 
             <section class="card list">
               <div class="list-head">
-                <h2>Dépenses<span class="count-badge"></span></h2>
+                <h2>Dépenses mensuelles<span class="count-badge" data-count="m"></span></h2>
                 <div class="io">
                   <button type="button" class="btn small" data-io="export">Exporter .json</button>
                   <button type="button" class="btn small" data-io="import">Importer .json</button>
@@ -302,7 +405,7 @@
                   </div>
                   <div class="field"><span>Trier par</span>
                     <div class="op-input">
-                      <select data-sort-by aria-label="Trier par" style="flex:1;text-align:left;padding:0 10px">
+                      <select data-sort-by aria-label="Trier par" class="sort-select">
                         <option value="">Ordre d'ajout</option>
                         <option value="motif">Motif</option>
                         <option value="montant">Montant</option>
@@ -311,24 +414,24 @@
                       <button type="button" class="btn" data-sort-dir aria-label="Inverser l'ordre de tri" title="Inverser l'ordre de tri">↑</button>
                     </div>
                   </div>
+                  <label class="field f-wide"><span>Affichage des dépenses annuelles</span>
+                    <select data-annual-mode>
+                      <option value="lisser">Lisser mensuellement les dépenses annuelles</option>
+                      <option value="separe">Afficher séparément les dépenses annuelles</option>
+                    </select>
+                  </label>
                 </div>
                 <div class="tools-foot"><button type="button" class="link reset-filters" hidden>Effacer les filtres</button></div>
               </details>
 
-              <div class="table-wrap">
-                <table class="expenses">
-                  <thead><tr>
-                    <th><button type="button" class="th-sort" data-col="motif">Motif<span class="arrow"></span></button></th>
-                    <th class="num"><button type="button" class="th-sort" data-col="montant">Montant<span class="arrow"></span></button></th>
-                    <th class="num"><button type="button" class="th-sort" data-col="jour">${JOUR_LABEL}<span class="arrow"></span></button></th>
-                    ${couple ? '<th class="num">Part Dyd</th><th class="num">Part Meg</th>' : ''}
-                    <th class="act"><span class="sr">Actions</span></th>
-                  </tr></thead>
-                  <tbody></tbody>
-                </table>
+              ${tableHTML(k, 'm')}
+
+              <div class="annual-block" hidden>
+                <h2 class="sub-title">Dépenses annuelles<span class="count-badge" data-count="a"></span></h2>
+                ${tableHTML(k, 'a')}
               </div>
-              <p class="filtered-total" hidden></p>
-              <dl class="totals"></dl>
+
+              <div class="totals"></div>
             </section>
           </div>
         </div>
@@ -338,12 +441,46 @@
   /* =========================================================
    * Calculs
    * ========================================================= */
-  function coupleTotals() {
+  // Totaux d'un onglet. Mensuel : dépenses mensuelles (+ annuelles ÷ 12 si lissage).
+  // Annuel : mensuelles × 12 + annuelles × 1.
+  function computeTotals(k) {
     const p = state.settings.partDyd;
-    let total = 0;
-    let dyd = 0;
-    state.couple.forEach((e) => { total += e.cents; dyd += partOf(e.cents, p); });
-    return { total, dyd, meg: total - dyd };
+    const t = { month: 0, monthDyd: 0, year: 0, yearDyd: 0 };
+    state[k].forEach((e) => {
+      const d = partOf(e.cents, p);
+      if (e.freq === 'a') {
+        t.year += e.cents;
+        t.yearDyd += d;
+        if (annualMode === 'lisser') {
+          const s = smooth(e.cents);
+          t.month += s;
+          t.monthDyd += partOf(s, p);
+        }
+      } else {
+        t.month += e.cents;
+        t.monthDyd += d;
+        t.year += 12 * e.cents;
+        t.yearDyd += 12 * d;
+      }
+    });
+    t.monthMeg = t.month - t.monthDyd;
+    t.yearMeg = t.year - t.yearDyd;
+    return t;
+  }
+
+  // Lignes d'un tableau : kind 'm' (mensuel) ou 'a' (annuel, affichage séparé)
+  function rowsFor(k, kind) {
+    const rows = [];
+    state[k].forEach((e) => {
+      if (e.freq !== 'a') {
+        if (kind === 'm') rows.push({ e, cents: e.cents, day: e.jour, order: e.jour, label: e.jour === null ? '—' : String(e.jour) });
+      } else if (kind === 'm' && annualMode === 'lisser') {
+        rows.push({ e, cents: smooth(e.cents), day: e.jour, order: e.jour, label: (e.jour === null ? '' : e.jour + ' ') + '(lissée)', smoothed: true });
+      } else if (kind === 'a' && annualMode === 'separe') {
+        rows.push({ e, cents: e.cents, day: e.jour, order: e.jour === null ? null : e.mois * 100 + e.jour, label: e.jour === null ? '—' : dateText(e.jour, e.mois) });
+      }
+    });
+    return rows;
   }
 
   const cmp = (op, a, b) => (op === 'gte' ? a >= b : op === 'lte' ? a <= b : a === b);
@@ -353,23 +490,23 @@
     return Boolean(f.motif.trim() || parseMontant(f.m) || f.j !== '');
   }
 
-  function visibleEntries(k) {
+  function visibleRows(k, all) {
     const { f, sortBy, sortDir } = ui[k];
-    let list = state[k].slice();
+    let list = all.slice();
     const q = norm(f.motif.trim());
-    if (q) list = list.filter((e) => norm(e.motif).includes(q));
+    if (q) list = list.filter((r) => norm(r.e.motif).includes(q));
     const m = parseMontant(f.m);
-    if (m) list = list.filter((e) => cmp(f.mOp, e.cents, m));
+    if (m) list = list.filter((r) => cmp(f.mOp, r.cents, m));
     const j = parseJour(f.j);
-    if (j.ok && j.value !== null) list = list.filter((e) => e.jour !== null && cmp(f.jOp, e.jour, j.value));
+    if (j.ok && j.value !== null) list = list.filter((r) => r.day !== null && cmp(f.jOp, r.day, j.value));
     if (sortBy) {
       list.sort((a, b) => {
-        if (sortBy === 'motif') return a.motif.localeCompare(b.motif, 'fr', { sensitivity: 'base', numeric: true }) * sortDir;
+        if (sortBy === 'motif') return a.e.motif.localeCompare(b.e.motif, 'fr', { sensitivity: 'base', numeric: true }) * sortDir;
         if (sortBy === 'montant') return (a.cents - b.cents) * sortDir;
-        if (a.jour === null && b.jour === null) return 0;
-        if (a.jour === null) return 1; // sans jour : toujours en fin de liste
-        if (b.jour === null) return -1;
-        return (a.jour - b.jour) * sortDir;
+        if (a.order === null && b.order === null) return 0;
+        if (a.order === null) return 1; // sans date : toujours en fin de liste
+        if (b.order === null) return -1;
+        return (a.order - b.order) * sortDir;
       });
     }
     return list;
@@ -378,38 +515,45 @@
   /* =========================================================
    * Rendu
    * ========================================================= */
-  function renderList(k) {
-    const panel = $('#panel-' + k);
+  function rowHTML(k, r, kind) {
     const couple = k === 'couple';
     const p = state.settings.partDyd;
-    const list = visibleEntries(k);
-    const all = state[k].length;
-    const cols = couple ? 6 : 4;
-    const editing = ui[k].editing;
+    const dyd = partOf(r.cents, p);
+    const e = r.e;
+    return `<tr data-id="${esc(e.id)}"${e.id === ui[k].editing ? ' class="is-editing"' : ''}>
+      <td class="motif" data-label="Motif">${esc(e.motif)}</td>
+      <td class="num" data-label="Montant"${r.smoothed ? ` title="${euro(e.cents)} par an ÷ 12"` : ''}>${euro(r.cents)}</td>
+      <td class="num${r.smoothed ? ' smoothed' : ''}" data-label="${kind === 'a' ? 'Le' : JOUR_LABEL}">${esc(r.label)}</td>
+      ${couple ? `<td class="num dyd" data-label="Part Dyd">${euro(dyd)}</td><td class="num meg" data-label="Part Meg">${euro(r.cents - dyd)}</td>` : ''}
+      <td class="act">
+        <button type="button" class="icon-btn" data-act="edit" aria-label="Modifier « ${esc(e.motif)} »" title="Modifier">${ICON_EDIT}</button>
+        <button type="button" class="icon-btn del" data-act="del" aria-label="Supprimer « ${esc(e.motif)} »" title="Supprimer">${ICON_DEL}</button>
+      </td>
+    </tr>`;
+  }
 
-    $('tbody', panel).innerHTML = list.length
-      ? list.map((e) => {
-        const dyd = partOf(e.cents, p);
-        return `<tr data-id="${esc(e.id)}"${e.id === editing ? ' class="is-editing"' : ''}>
-          <td class="motif" data-label="Motif">${esc(e.motif)}</td>
-          <td class="num" data-label="Montant">${euro(e.cents)}</td>
-          <td class="num" data-label="${JOUR_LABEL}">${e.jour === null ? '—' : e.jour}</td>
-          ${couple ? `<td class="num dyd" data-label="Part Dyd">${euro(dyd)}</td><td class="num meg" data-label="Part Meg">${euro(e.cents - dyd)}</td>` : ''}
-          <td class="act">
-            <button type="button" class="icon-btn" data-act="edit" aria-label="Modifier « ${esc(e.motif)} »" title="Modifier">${ICON_EDIT}</button>
-            <button type="button" class="icon-btn del" data-act="del" aria-label="Supprimer « ${esc(e.motif)} »" title="Supprimer">${ICON_DEL}</button>
-          </td>
-        </tr>`;
-      }).join('')
-      : `<tr><td class="empty" colspan="${cols}">${all ? 'Aucune dépense ne correspond à la recherche.' : 'Aucune dépense pour le moment.'}</td></tr>`;
-
+  function renderList(k) {
+    const panel = $('#panel-' + k);
+    const cols = k === 'couple' ? 6 : 4;
     const active = filtersActive(k);
-    $('.count-badge', panel).textContent = all ? (active ? ` · ${list.length} sur ${all}` : ` · ${all}`) : '';
+
+    ['m', 'a'].forEach((kind) => {
+      const all = rowsFor(k, kind);
+      const list = visibleRows(k, all);
+      const word = kind === 'm' ? 'mensuelle' : 'annuelle';
+      $(`table[data-kind="${kind}"] tbody`, panel).innerHTML = list.length
+        ? list.map((r) => rowHTML(k, r, kind)).join('')
+        : `<tr><td class="empty" colspan="${cols}">${all.length ? 'Aucune dépense ne correspond à la recherche.' : `Aucune dépense ${word} pour le moment.`}</td></tr>`;
+      $(`[data-count="${kind}"]`, panel).textContent = all.length ? (active ? ` · ${list.length} sur ${all.length}` : ` · ${all.length}`) : '';
+      const ft = $(`[data-ft="${kind}"]`, panel);
+      ft.hidden = !active || !all.length;
+      if (active) ft.textContent = `Total des dépenses ${word}s affichées : ` + euro(list.reduce((s, r) => s + r.cents, 0));
+    });
+
+    $('.annual-block', panel).hidden = annualMode !== 'separe';
     $('.active-dot', panel).hidden = !active;
     $('.reset-filters', panel).hidden = !active;
-    const ft = $('.filtered-total', panel);
-    ft.hidden = !active;
-    if (active) ft.textContent = 'Total des dépenses affichées : ' + euro(sum(list));
+    $('[data-annual-mode]', panel).value = annualMode;
 
     // Indicateurs de tri
     const { sortBy, sortDir } = ui[k];
@@ -429,18 +573,26 @@
 
   function renderTotals(k) {
     const row = (label, cents, cls = '') => `<div class="t-row ${cls}"><dt>${label}</dt><dd>${euro(cents)}</dd></div>`;
+    const group = (html) => `<dl class="t-group">${html}</dl>`;
+    const t = computeTotals(k);
     let html;
     if (k === 'couple') {
-      const t = coupleTotals();
-      html = row('Total des dépenses mensuelles du couple', t.total, 'grand')
-        + row('Dyd - Total des dépenses mensuelles dans le couple', t.dyd, 'dyd')
-        + row('Meg - Total des dépenses mensuelles dans le couple', t.meg, 'meg');
+      html = group(row('Total des dépenses mensuelles du couple', t.month, 'grand')
+        + row('Dyd - Total des dépenses mensuelles dans le couple', t.monthDyd, 'dyd')
+        + row('Meg - Total des dépenses mensuelles dans le couple', t.monthMeg, 'meg'))
+        + group(row('Total des dépenses annuelles du couple', t.year, 'grand')
+        + row('Dyd - Total des dépenses annuelles dans le couple', t.yearDyd, 'dyd')
+        + row('Meg - Total des dépenses annuelles dans le couple', t.yearMeg, 'meg'));
     } else {
-      const perso = sum(state[k]);
-      const inCouple = coupleTotals()[k];
-      html = row('Total des dépenses mensuelles personnelles', perso)
-        + row('Total des dépenses mensuelles dans le couple', inCouple)
-        + row('Total des dépenses mensuelles ' + WHO[k], perso + inCouple, 'grand');
+      const c = computeTotals('couple');
+      const cm = k === 'dyd' ? c.monthDyd : c.monthMeg;
+      const cy = k === 'dyd' ? c.yearDyd : c.yearMeg;
+      html = group(row('Total des dépenses mensuelles personnelles', t.month)
+        + row('Total des dépenses mensuelles dans le couple', cm)
+        + row('Total des dépenses mensuelles ' + WHO[k], t.month + cm, 'grand'))
+        + group(row('Total des dépenses annuelles personnelles', t.year)
+        + row('Total des dépenses annuelles dans le couple', cy)
+        + row('Total des dépenses annuelles ' + WHO[k], t.year + cy, 'grand'));
     }
     $('#panel-' + k + ' .totals').innerHTML = html;
   }
@@ -490,36 +642,65 @@
   }
 
   /* =========================================================
-   * Actions sur les dépenses
+   * Formulaire
    * ========================================================= */
-  function storageKey(k) { return k; }
+  function formOf(k) { return $('#panel-' + k + ' form.entry'); }
+
+  // Bascule entre dépense mensuelle et annuelle (convertit la valeur du 3e champ)
+  function setFormType(k, type, convert = true) {
+    const form = formOf(k);
+    const prev = ui[k].formType;
+    ui[k].formType = type;
+    $$('.type-switch button', form).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.type === type)));
+    $('.jour-label', form).textContent = type === 'a' ? DATE_LABEL : JOUR_LABEL;
+    form.jour.placeholder = type === 'a' ? 'JJ/MM' : '1 à 31';
+    form.jour.removeAttribute('aria-invalid');
+    if (convert && prev !== type) {
+      const v = form.jour.value;
+      let nv = '';
+      if (type === 'a') {
+        if (/^\d{1,2}$/.test(v)) nv = pad2(v) + '/';
+      } else {
+        const m = /^(\d{1,2})/.exec(v);
+        if (m && RE_JOUR.test(String(Number(m[1])))) nv = String(Number(m[1]));
+      }
+      setVal(form.jour, nv);
+    }
+  }
+
+  function setSwitchLabels(form, editing) {
+    $('[data-type="m"]', form).textContent = editing ? 'Dépense mensuelle' : 'Nouvelle dépense mensuelle';
+    $('[data-type="a"]', form).textContent = editing ? 'Dépense annuelle' : 'Nouvelle dépense annuelle';
+  }
 
   function exitEdit(k) {
-    const panel = $('#panel-' + k);
-    const form = $('form.entry', panel);
+    const form = formOf(k);
     ui[k].editing = null;
     form.reset();
     $$('input', form).forEach((i) => { i.dataset.last = ''; i.removeAttribute('aria-invalid'); });
     $('.motif-count', form).textContent = '0/100';
     $('.form-msg', form).textContent = '';
-    $('.entry-title', form).textContent = 'Nouvelle dépense';
+    $('.entry-title', form).hidden = true;
     $('.cancel-edit', form).hidden = true;
+    setSwitchLabels(form, false);
     form.classList.remove('editing');
   }
 
   function startEdit(k, id) {
     const e = state[k].find((x) => x.id === id);
     if (!e) return;
-    const form = $('#panel-' + k + ' form.entry');
+    const form = formOf(k);
     ui[k].editing = id;
+    setFormType(k, e.freq, false);
     setVal(form.motif, e.motif);
     setVal(form.montant, centsToInput(e.cents));
-    setVal(form.jour, e.jour === null ? '' : String(e.jour));
+    setVal(form.jour, e.jour === null ? '' : e.freq === 'a' ? dateText(e.jour, e.mois) : String(e.jour));
     $('.motif-count', form).textContent = e.motif.length + '/100';
     $('.form-msg', form).textContent = '';
     $$('input', form).forEach((i) => i.removeAttribute('aria-invalid'));
-    $('.entry-title', form).textContent = 'Modifier la dépense';
+    $('.entry-title', form).hidden = false;
     $('.cancel-edit', form).hidden = false;
+    setSwitchLabels(form, true);
     form.classList.add('editing');
     renderList(k);
     form.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -527,28 +708,41 @@
   }
 
   function submitEntry(k, form) {
+    const type = ui[k].formType;
     const motif = form.motif.value.trim();
     const cents = parseMontant(form.montant.value);
-    const jour = parseJour(form.jour.value);
+    let jour = null;
+    let mois = null;
+    let dateOk;
+    if (type === 'a') {
+      const d = parseDate(form.jour.value);
+      dateOk = d.ok;
+      jour = d.jour;
+      mois = d.mois;
+    } else {
+      const j = parseJour(form.jour.value);
+      dateOk = j.ok;
+      jour = j.value;
+    }
     const errors = [];
     form.motif.setAttribute('aria-invalid', String(!motif));
     form.montant.setAttribute('aria-invalid', String(!cents));
-    form.jour.setAttribute('aria-invalid', String(!jour.ok));
+    form.jour.setAttribute('aria-invalid', String(!dateOk));
     if (!motif) errors.push('Le motif est obligatoire.');
     if (!cents) errors.push('Le montant doit être un nombre positif (2 décimales maximum).');
-    if (!jour.ok) errors.push('Le jour du mois doit être un entier de 1 à 31.');
+    if (!dateOk) errors.push(type === 'a' ? 'La date doit être au format JJ/MM (ex. 13/04).' : 'Le jour du mois doit être un entier de 1 à 31.');
     if (errors.length) {
       $('.form-msg', form).textContent = errors.join(' ');
       (!motif ? form.motif : !cents ? form.montant : form.jour).focus();
       return;
     }
-    const entry = { motif: motif.slice(0, 100), cents, jour: jour.value };
+    const entry = { motif: motif.slice(0, 100), cents, freq: type, jour: dateOk ? jour : null, mois: type === 'a' ? mois : null };
     const editing = ui[k].editing;
     const idx = editing ? state[k].findIndex((x) => x.id === editing) : -1;
     if (idx >= 0) state[k][idx] = { id: editing, ...entry };
     else state[k].push({ id: uid(), ...entry });
     exitEdit(k);
-    Store.save(storageKey(k));
+    Store.save(k);
     renderAll();
     form.motif.focus();
   }
@@ -558,11 +752,11 @@
     if (idx < 0) return;
     const [removed] = state[k].splice(idx, 1);
     if (ui[k].editing === id) exitEdit(k);
-    Store.save(storageKey(k));
+    Store.save(k);
     renderAll();
     toast(`« ${removed.motif.length > 30 ? removed.motif.slice(0, 30) + '…' : removed.motif} » supprimée`, 'Annuler', () => {
       state[k].splice(Math.min(idx, state[k].length), 0, removed);
-      Store.save(storageKey(k));
+      Store.save(k);
       renderAll();
     });
   }
@@ -573,12 +767,14 @@
   function exportTab(k) {
     const payload = {
       application: 'depenses-couple',
-      version: 1,
+      version: 2,
       onglet: k,
       nomOnglet: TAB_LABEL[k],
       exporteLe: new Date().toISOString(),
       ...(k === 'couple' ? { partDyd: state.settings.partDyd, partMeg: 100 - state.settings.partDyd } : {}),
-      depenses: state[k].map((e) => ({ motif: e.motif, montant: e.cents / 100, jour: e.jour }))
+      depenses: state[k].map((e) => (e.freq === 'a'
+        ? { motif: e.motif, montant: e.cents / 100, type: 'annuelle', date: e.jour === null ? null : dateText(e.jour, e.mois) }
+        : { motif: e.motif, montant: e.cents / 100, type: 'mensuelle', jour: e.jour }))
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -612,7 +808,7 @@
 
     state[k] = entries;
     exitEdit(k);
-    Store.save(storageKey(k));
+    Store.save(k);
     if (k === 'couple' && json && !Array.isArray(json)) {
       const p = validPart(json.partDyd);
       if (p !== null) { state.settings.partDyd = p; Store.save('settings'); }
@@ -632,18 +828,22 @@
       const form = $('form.entry', panel);
 
       restrict(form.montant, RE_MONTANT);
-      restrict(form.jour, RE_JOUR);
+      attachDayOrDate(form.jour, () => ui[k].formType);
       restrict($('[data-f="m"]', panel), RE_MONTANT);
       restrict($('[data-f="j"]', panel), RE_JOUR);
 
+      $$('.type-switch button', form).forEach((b) => b.addEventListener('click', () => {
+        setFormType(k, b.dataset.type);
+        form.jour.focus();
+      }));
       form.addEventListener('submit', (ev) => { ev.preventDefault(); submitEntry(k, form); });
       form.motif.addEventListener('input', () => { $('.motif-count', form).textContent = form.motif.value.length + '/100'; });
       $$('input', form).forEach((i) => i.addEventListener('input', () => i.removeAttribute('aria-invalid')));
       $('.cancel-edit', form).addEventListener('click', () => { exitEdit(k); renderList(k); });
       form.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && ui[k].editing) { exitEdit(k); renderList(k); } });
 
-      // Clic sur modifier / supprimer
-      $('tbody', panel).addEventListener('click', (ev) => {
+      // Clic sur modifier / supprimer (tableaux mensuel et annuel)
+      panel.addEventListener('click', (ev) => {
         const btn = ev.target.closest('[data-act]');
         if (!btn) return;
         const id = btn.closest('tr').dataset.id;
@@ -659,9 +859,16 @@
         });
       });
       $('.reset-filters', panel).addEventListener('click', () => {
-        ui[k].f = { motif: '', mOp: 'eq', m: '', jOp: 'eq', j: '' };
+        ui[k].f = emptyFilters();
         $$('[data-f]', panel).forEach((el) => setVal(el, ui[k].f[el.dataset.f]));
         renderList(k);
+      });
+
+      // Affichage des dépenses annuelles (commun aux trois onglets)
+      $('[data-annual-mode]', panel).addEventListener('change', (ev) => {
+        annualMode = ev.target.value === 'separe' ? 'separe' : 'lisser';
+        try { localStorage.setItem(LS_MODE, annualMode); } catch (_) { /* indisponible */ }
+        renderAll();
       });
 
       // Tri

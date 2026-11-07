@@ -261,7 +261,38 @@ main { padding: 20px 16px 48px; }
 
 /* ---------- Form ---------- */
 .fields { display: grid; grid-template-columns: minmax(0, 2.2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
-.field { display: grid; gap: 5px; min-width: 0; }
+.field { display: grid; gap: 5px; min-width: 0; align-content: start; }
+.fields { align-items: start; }
+.entry-title { margin-bottom: 10px !important; }
+
+.type-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.type-switch button {
+  border: 0;
+  background: transparent;
+  padding: 9px 10px;
+  border-radius: 9px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1.25;
+}
+.type-switch button:hover { color: var(--ink); }
+.type-switch button[aria-pressed="true"] { background: #fff; color: var(--ink); box-shadow: var(--shadow); }
+.type-switch button:focus-visible { outline: 2px solid var(--dyd); outline-offset: 2px; }
+
+.op-input .sort-select { flex: 1; text-align: left; padding: 0 10px; }
+.tools-grid .f-wide { grid-column: 1 / -1; }
+.sub-title { margin: 26px 0 8px !important; font-size: 16px; }
+.expenses td.smoothed { color: var(--muted); }
 .field > span { font-size: 13px; font-weight: 600; color: var(--muted); }
 .field > span i { color: var(--danger); font-style: normal; }
 .field input, .field select {
@@ -348,7 +379,8 @@ table.expenses { width: 100%; border-collapse: collapse; font-variant-numeric: t
 
 .filtered-total { margin: 10px 0 0; font-size: 13px; color: var(--muted); text-align: right; }
 
-.totals { margin: 16px 0 0; display: grid; gap: 2px; }
+.totals { margin: 18px 0 0; display: grid; gap: 14px; }
+.t-group { margin: 0; display: grid; gap: 2px; }
 .t-row {
   display: flex;
   justify-content: space-between;
