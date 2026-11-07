@@ -2,6 +2,6 @@
 // Laisser vide = les données restent dans le navigateur de l'appareil (mode local).
 // Voir README.md pour la mise en place (5 minutes, gratuit).
 window.APP_CONFIG = {
-  supabaseUrl: "",   // ex. "https://abcdefgh.supabase.co"
-  supabaseKey: ""    // clé publique « publishable » (sb_publishable_…) ou « anon »
+  supabaseUrl: "https://raiaeiumtkhrzbqiszww.supabase.co",
+  supabaseKey: "sb_publishable_VWKrTVQk2UxYl1fHbkeq3w_3k3Z_lH_" // clé publique (jamais la clé secrète)
 };
