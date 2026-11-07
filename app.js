@@ -10,11 +10,20 @@
   const LOCAL_PASSWORD_SHA256 = '110812f67fa1e1f0117f6f3d70241c1a42a7b07711a93c2477cc516d9042f9db';
   const LS_DATA = 'depenses-couple:data:v1';
   const LS_TAB = 'depenses-couple:tab';
+  const LS_SUB = 'depenses-couple:sub';
   const LS_MODE = 'depenses-couple:annualMode';
   const SS_PWD = 'depenses-couple:session';
-  const LISTS = ['dyd', 'meg', 'couple'];
+
+  // Entités (onglets principaux) et listes (sous-onglets Dépenses / Épargne)
+  const ENTITIES = ['dyd', 'meg', 'couple'];
+  const LISTS = ['dyd', 'meg', 'couple', 'dyd_ep', 'meg_ep', 'couple_ep'];
+  const isEp = (k) => k.endsWith('_ep');
+  const entOf = (k) => k.replace(/_ep$/, '');
   const WHO = { dyd: 'Dyd', meg: 'Meg' };
-  const TAB_LABEL = { dyd: 'Dépenses Dyd', meg: 'Dépenses Meg', couple: 'Dépenses du couple' };
+  const ENT_LABEL = { dyd: 'Comptes Dyd', meg: 'Comptes Meg', couple: 'Comptes du couple' };
+  const listLabel = (k) => ENT_LABEL[entOf(k)] + ' › ' + (isEp(k) ? 'Épargne' : 'Dépenses');
+  const noun = (k) => (isEp(k) ? 'épargnes' : 'dépenses');
+
   const JOUR_LABEL = 'Le ... du mois';
   const DATE_LABEL = 'Le ... (JJ/MM)';
   const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -22,13 +31,20 @@
   /* =========================================================
    * État
    * ========================================================= */
-  // Dépense : { id, motif, cents, freq: 'm' (mensuelle) | 'a' (annuelle), jour, mois }
-  const state = { dyd: [], meg: [], couple: [], settings: { partDyd: 50 } };
+  // Élément : { id, motif, cents, freq: 'm' (mensuel) | 'a' (annuel), jour, mois }
+  // Les épargnes sont toujours mensuelles, sans date.
+  const state = { settings: { partDyd: 50 } };
+  LISTS.forEach((k) => { state[k] = []; });
   const emptyFilters = () => ({ motif: '', mOp: 'eq', m: '', jOp: 'eq', j: '' });
   const ui = {};
   LISTS.forEach((k) => {
     ui[k] = { sortBy: '', sortDir: 1, f: emptyFilters(), editing: null, formType: 'm' };
   });
+  const subTab = { dyd: 'dep', meg: 'dep', couple: 'dep' };
+  try {
+    const s = JSON.parse(localStorage.getItem(LS_SUB) || '{}');
+    ENTITIES.forEach((e) => { if (s[e] === 'dep' || s[e] === 'ep') subTab[e] = s[e]; });
+  } catch (_) { /* indisponible */ }
   // Affichage des dépenses annuelles : 'lisser' (÷ 12 dans le tableau mensuel) ou 'separe'
   let annualMode = 'lisser';
   try {
@@ -43,6 +59,7 @@
    * ========================================================= */
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const root = (k) => $('#list-' + k);
   const nf = new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const euro = (cents) => nf.format(cents / 100) + ' €';
   const pct = (p) => String(p).replace('.', ',') + '%';
@@ -105,8 +122,8 @@
   };
   const present = (v) => v !== null && v !== undefined && v !== '';
 
-  // Nettoie / valide une dépense (données importées ou chargées)
-  function cleanEntry(e, keepId) {
+  // Nettoie / valide un élément (données importées ou chargées)
+  function cleanEntry(e, keepId, ep) {
     if (!e || typeof e !== 'object') return null;
     const motif = typeof e.motif === 'string' ? e.motif.trim().slice(0, 100) : '';
     if (!motif) return null;
@@ -117,6 +134,8 @@
       if (Math.abs(c - Math.round(c)) < 1e-6 && c > 0) cents = Math.round(c);
     } else if (typeof e.montant === 'string') cents = parseMontant(e.montant);
     if (!cents) return null;
+    const id = keepId && typeof e.id === 'string' && e.id ? e.id : uid();
+    if (ep) return { id, motif, cents, freq: 'm', jour: null, mois: null };
 
     const freq = e.freq === 'a' || e.type === 'annuelle' ? 'a' : 'm';
     let jour = null;
@@ -136,14 +155,13 @@
       jour = d.jour;
       mois = d.mois;
     }
-    const id = keepId && typeof e.id === 'string' && e.id ? e.id : uid();
     return { id, motif, cents, freq, jour, mois };
   }
 
   function applyData(data) {
     const d = data && typeof data === 'object' ? data : {};
     LISTS.forEach((k) => {
-      state[k] = Array.isArray(d[k]) ? d[k].map((e) => cleanEntry(e, true)).filter(Boolean) : [];
+      state[k] = Array.isArray(d[k]) ? d[k].map((e) => cleanEntry(e, true, isEp(k))).filter(Boolean) : [];
     });
     const p = validPart(d.settings && d.settings.partDyd);
     state.settings = { partDyd: p === null ? 50 : p };
@@ -163,6 +181,7 @@
 
   // Restreint la saisie d'un champ à une expression régulière
   function restrict(input, re) {
+    if (!input) return;
     input.dataset.last = input.value;
     input.addEventListener('input', () => {
       let v = input.value;
@@ -179,7 +198,7 @@
     });
   }
 
-  // 3e champ du formulaire : jour du mois (1-31) ou date JJ/MM avec « / » automatique
+  // 3e champ du formulaire de dépense : jour du mois (1-31) ou date JJ/MM avec « / » automatique
   function attachDayOrDate(input, getType) {
     input.dataset.last = input.value;
     input.addEventListener('input', (ev) => {
@@ -204,7 +223,7 @@
       } else revert(input, v);
     });
   }
-  function setVal(input, v) { input.value = v; input.dataset.last = v; }
+  function setVal(input, v) { if (input) { input.value = v; input.dataset.last = v; } }
 
   /* =========================================================
    * Stockage (Supabase en ligne, ou navigateur en local)
@@ -315,28 +334,8 @@
   const ICON_EDIT = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
   const ICON_DEL = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>';
 
-  function tableHTML(k, kind) {
-    const couple = k === 'couple';
+  function shareHTML() {
     return `
-      <div class="table-wrap">
-        <table class="expenses" data-kind="${kind}">
-          <thead><tr>
-            <th><button type="button" class="th-sort" data-col="motif">Motif<span class="arrow"></span></button></th>
-            <th class="num"><button type="button" class="th-sort" data-col="montant">Montant<span class="arrow"></span></button></th>
-            <th class="num"><button type="button" class="th-sort" data-col="jour">${kind === 'a' ? 'Le' : JOUR_LABEL}<span class="arrow"></span></button></th>
-            ${couple ? '<th class="num">Part Dyd</th><th class="num">Part Meg</th>' : ''}
-            <th class="act"><span class="sr">Actions</span></th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <p class="filtered-total" data-ft="${kind}" hidden></p>`;
-  }
-
-  function panelHTML(k) {
-    const couple = k === 'couple';
-    const opSelect = (name, label) => `<select data-f="${name}" aria-label="${label}"><option value="eq">=</option><option value="gte">≥</option><option value="lte">≤</option></select>`;
-    const share = couple ? `
       <aside class="card share">
         <h2>Répartition des parts</h2>
         <div class="share-slider">
@@ -349,90 +348,147 @@
           <div class="meg">Meg<b id="share-meg">50%</b></div>
         </div>
         <button type="button" class="link" id="share-reset">Remettre à 50%/50%</button>
-      </aside>` : '';
+      </aside>`;
+  }
 
+  function tableHTML(k, kind) {
+    const ep = isEp(k);
+    const couple = entOf(k) === 'couple';
     return `
-      <section class="panel" id="panel-${k}" role="tabpanel" aria-label="${TAB_LABEL[k]}" hidden>
+      <div class="table-wrap">
+        <table class="expenses" data-kind="${kind}">
+          <thead><tr>
+            <th><button type="button" class="th-sort" data-col="motif">Motif<span class="arrow"></span></button></th>
+            <th class="num"><button type="button" class="th-sort" data-col="montant">Montant<span class="arrow"></span></button></th>
+            ${ep ? '' : `<th class="num"><button type="button" class="th-sort" data-col="jour">${kind === 'a' ? 'Le' : JOUR_LABEL}<span class="arrow"></span></button></th>`}
+            ${couple ? '<th class="num">Part Dyd</th><th class="num">Part Meg</th>' : ''}
+            <th class="act"><span class="sr">Actions</span></th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="filtered-total" data-ft="${kind}" hidden></p>`;
+  }
+
+  function formHTML(k) {
+    const motifField = `
+      <label class="field f-motif"><span>Motif <i>*</i></span>
+        <input name="motif" maxlength="100" required enterkeyhint="next">
+        <small class="motif-count">0/100</small>
+      </label>`;
+    const actions = `
+      <p class="form-msg" role="alert"></p>
+      <div class="form-actions">
+        <button type="submit" class="btn primary">Valider</button>
+        <button type="button" class="btn cancel-edit" hidden>Annuler</button>
+      </div>`;
+    if (isEp(k)) {
+      return `
+        <form class="card entry" novalidate autocomplete="off">
+          <h2 class="entry-title">Nouvelle épargne mensuelle</h2>
+          <div class="fields fields-2">
+            ${motifField}
+            <label class="field"><span>Montant <i>*</i></span>
+              <span class="suffix"><input name="montant" inputmode="decimal" required placeholder="0,00" enterkeyhint="done"><em>€</em></span>
+            </label>
+          </div>
+          ${actions}
+        </form>`;
+    }
+    return `
+      <form class="card entry" novalidate autocomplete="off">
+        <h2 class="entry-title" hidden>Modifier la dépense</h2>
+        <div class="type-switch" role="group" aria-label="Type de dépense">
+          <button type="button" data-type="m" aria-pressed="true">Nouvelle dépense mensuelle</button>
+          <button type="button" data-type="a" aria-pressed="false">Nouvelle dépense annuelle</button>
+        </div>
+        <div class="fields">
+          ${motifField}
+          <label class="field"><span>Montant <i>*</i></span>
+            <span class="suffix"><input name="montant" inputmode="decimal" required placeholder="0,00" enterkeyhint="next"><em>€</em></span>
+          </label>
+          <label class="field"><span class="jour-label">${JOUR_LABEL}</span>
+            <input name="jour" inputmode="numeric" placeholder="1 à 31" enterkeyhint="done">
+          </label>
+        </div>
+        ${actions}
+      </form>`;
+  }
+
+  function toolsHTML(k) {
+    const ep = isEp(k);
+    const opSelect = (name, label) => `<select data-f="${name}" aria-label="${label}"><option value="eq">=</option><option value="gte">≥</option><option value="lte">≤</option></select>`;
+    return `
+      <details class="tools">
+        <summary>Rechercher et trier <span class="active-dot" hidden></span></summary>
+        <div class="tools-grid">
+          <label class="field f-search"><span>Motif</span>
+            <input type="search" data-f="motif" maxlength="100" placeholder="Rechercher…">
+          </label>
+          <div class="field"><span>Montant</span>
+            <div class="op-input">${opSelect('mOp', 'Comparaison du montant')}<input data-f="m" inputmode="decimal" placeholder="0,00" aria-label="Montant recherché"></div>
+          </div>
+          ${ep ? '' : `<div class="field"><span>${JOUR_LABEL}</span>
+            <div class="op-input">${opSelect('jOp', 'Comparaison du jour')}<input data-f="j" inputmode="numeric" placeholder="1 à 31" aria-label="Jour recherché"></div>
+          </div>`}
+          <div class="field"><span>Trier par</span>
+            <div class="op-input">
+              <select data-sort-by aria-label="Trier par" class="sort-select">
+                <option value="">Ordre d'ajout</option>
+                <option value="motif">Motif</option>
+                <option value="montant">Montant</option>
+                ${ep ? '' : `<option value="jour">${JOUR_LABEL}</option>`}
+              </select>
+              <button type="button" class="btn" data-sort-dir aria-label="Inverser l'ordre de tri" title="Inverser l'ordre de tri">↑</button>
+            </div>
+          </div>
+          ${ep ? '' : `<label class="field f-wide"><span>Affichage des dépenses annuelles</span>
+            <select data-annual-mode>
+              <option value="lisser">Lisser mensuellement les dépenses annuelles</option>
+              <option value="separe">Afficher séparément les dépenses annuelles</option>
+            </select>
+          </label>`}
+        </div>
+        <div class="tools-foot"><button type="button" class="link reset-filters" hidden>Effacer les filtres</button></div>
+      </details>`;
+  }
+
+  function listCardHTML(k) {
+    const ep = isEp(k);
+    return `
+      <section class="card list">
+        <div class="list-head">
+          <h2>${ep ? 'Épargnes mensuelles' : 'Dépenses mensuelles'}<span class="count-badge" data-count="m"></span></h2>
+          <div class="io">
+            <button type="button" class="btn small" data-io="export">Exporter .json</button>
+            <button type="button" class="btn small" data-io="import">Importer .json</button>
+            <input type="file" class="file" accept=".json,application/json" hidden>
+          </div>
+        </div>
+        ${toolsHTML(k)}
+        ${tableHTML(k, 'm')}
+        ${ep ? '' : `<div class="annual-block" hidden>
+          <h2 class="sub-title">Dépenses annuelles<span class="count-badge" data-count="a"></span></h2>
+          ${tableHTML(k, 'a')}
+        </div>`}
+        <div class="totals"></div>
+        <div class="totals-combined"></div>
+      </section>`;
+  }
+
+  function entityHTML(ent) {
+    const couple = ent === 'couple';
+    return `
+      <section class="panel" id="panel-${ent}" role="tabpanel" aria-label="${ENT_LABEL[ent]}" hidden>
+        <div class="subtabs" role="tablist" aria-label="Rubriques de ${ENT_LABEL[ent]}">
+          <button type="button" role="tab" class="subtab" data-sub="dep">Dépenses</button>
+          <button type="button" role="tab" class="subtab" data-sub="ep">Épargne</button>
+        </div>
         <div class="layout${couple ? ' has-side' : ''}">
-          ${share}
-          <div class="main-col">
-            <form class="card entry" novalidate autocomplete="off">
-              <h2 class="entry-title" hidden>Modifier la dépense</h2>
-              <div class="type-switch" role="group" aria-label="Type de dépense">
-                <button type="button" data-type="m" aria-pressed="true">Nouvelle dépense mensuelle</button>
-                <button type="button" data-type="a" aria-pressed="false">Nouvelle dépense annuelle</button>
-              </div>
-              <div class="fields">
-                <label class="field f-motif"><span>Motif <i>*</i></span>
-                  <input name="motif" maxlength="100" required enterkeyhint="next">
-                  <small class="motif-count">0/100</small>
-                </label>
-                <label class="field"><span>Montant <i>*</i></span>
-                  <span class="suffix"><input name="montant" inputmode="decimal" required placeholder="0,00" enterkeyhint="next"><em>€</em></span>
-                </label>
-                <label class="field"><span class="jour-label">${JOUR_LABEL}</span>
-                  <input name="jour" inputmode="numeric" placeholder="1 à 31" enterkeyhint="done">
-                </label>
-              </div>
-              <p class="form-msg" role="alert"></p>
-              <div class="form-actions">
-                <button type="submit" class="btn primary">Valider</button>
-                <button type="button" class="btn cancel-edit" hidden>Annuler</button>
-              </div>
-            </form>
-
-            <section class="card list">
-              <div class="list-head">
-                <h2>Dépenses mensuelles<span class="count-badge" data-count="m"></span></h2>
-                <div class="io">
-                  <button type="button" class="btn small" data-io="export">Exporter .json</button>
-                  <button type="button" class="btn small" data-io="import">Importer .json</button>
-                  <input type="file" class="file" accept=".json,application/json" hidden>
-                </div>
-              </div>
-
-              <details class="tools">
-                <summary>Rechercher et trier <span class="active-dot" hidden></span></summary>
-                <div class="tools-grid">
-                  <label class="field f-search"><span>Motif</span>
-                    <input type="search" data-f="motif" maxlength="100" placeholder="Rechercher…">
-                  </label>
-                  <div class="field"><span>Montant</span>
-                    <div class="op-input">${opSelect('mOp', 'Comparaison du montant')}<input data-f="m" inputmode="decimal" placeholder="0,00" aria-label="Montant recherché"></div>
-                  </div>
-                  <div class="field"><span>${JOUR_LABEL}</span>
-                    <div class="op-input">${opSelect('jOp', 'Comparaison du jour')}<input data-f="j" inputmode="numeric" placeholder="1 à 31" aria-label="Jour recherché"></div>
-                  </div>
-                  <div class="field"><span>Trier par</span>
-                    <div class="op-input">
-                      <select data-sort-by aria-label="Trier par" class="sort-select">
-                        <option value="">Ordre d'ajout</option>
-                        <option value="motif">Motif</option>
-                        <option value="montant">Montant</option>
-                        <option value="jour">${JOUR_LABEL}</option>
-                      </select>
-                      <button type="button" class="btn" data-sort-dir aria-label="Inverser l'ordre de tri" title="Inverser l'ordre de tri">↑</button>
-                    </div>
-                  </div>
-                  <label class="field f-wide"><span>Affichage des dépenses annuelles</span>
-                    <select data-annual-mode>
-                      <option value="lisser">Lisser mensuellement les dépenses annuelles</option>
-                      <option value="separe">Afficher séparément les dépenses annuelles</option>
-                    </select>
-                  </label>
-                </div>
-                <div class="tools-foot"><button type="button" class="link reset-filters" hidden>Effacer les filtres</button></div>
-              </details>
-
-              ${tableHTML(k, 'm')}
-
-              <div class="annual-block" hidden>
-                <h2 class="sub-title">Dépenses annuelles<span class="count-badge" data-count="a"></span></h2>
-                ${tableHTML(k, 'a')}
-              </div>
-
-              <div class="totals"></div>
-            </section>
+          ${couple ? shareHTML() : ''}
+          <div class="content-col">
+            <div class="sub-panel main-col" id="list-${ent}" role="tabpanel" aria-label="Dépenses">${formHTML(ent)}${listCardHTML(ent)}</div>
+            <div class="sub-panel main-col" id="list-${ent}_ep" role="tabpanel" aria-label="Épargne" hidden>${formHTML(ent + '_ep')}${listCardHTML(ent + '_ep')}</div>
           </div>
         </div>
       </section>`;
@@ -441,8 +497,8 @@
   /* =========================================================
    * Calculs
    * ========================================================= */
-  // Totaux d'un onglet. Mensuel : dépenses mensuelles (+ annuelles ÷ 12 si lissage).
-  // Annuel : mensuelles × 12 + annuelles × 1.
+  // Totaux d'une liste. Mensuel : éléments mensuels (+ annuels ÷ 12 si lissage).
+  // Annuel : mensuels × 12 + annuels × 1.
   function computeTotals(k) {
     const p = state.settings.partDyd;
     const t = { month: 0, monthDyd: 0, year: 0, yearDyd: 0 };
@@ -468,7 +524,17 @@
     return t;
   }
 
-  // Lignes d'un tableau : kind 'm' (mensuel) ou 'a' (annuel, affichage séparé)
+  // Totaux d'une personne (perso + sa part du couple) pour les dépenses ou les épargnes
+  function personTotals(ent, ep) {
+    const own = computeTotals(ep ? ent + '_ep' : ent);
+    const c = computeTotals(ep ? 'couple_ep' : 'couple');
+    const W = WHO[ent];
+    const inMonth = c['month' + W];
+    const inYear = c['year' + W];
+    return { own, inMonth, inYear, month: own.month + inMonth, year: own.year + inYear };
+  }
+
+  // Lignes d'un tableau : kind 'm' (mensuel) ou 'a' (dépenses annuelles affichées séparément)
   function rowsFor(k, kind) {
     const rows = [];
     state[k].forEach((e) => {
@@ -516,14 +582,15 @@
    * Rendu
    * ========================================================= */
   function rowHTML(k, r, kind) {
-    const couple = k === 'couple';
+    const ep = isEp(k);
+    const couple = entOf(k) === 'couple';
     const p = state.settings.partDyd;
     const dyd = partOf(r.cents, p);
     const e = r.e;
     return `<tr data-id="${esc(e.id)}"${e.id === ui[k].editing ? ' class="is-editing"' : ''}>
       <td class="motif" data-label="Motif">${esc(e.motif)}</td>
       <td class="num" data-label="Montant"${r.smoothed ? ` title="${euro(e.cents)} par an ÷ 12"` : ''}>${euro(r.cents)}</td>
-      <td class="num${r.smoothed ? ' smoothed' : ''}" data-label="${kind === 'a' ? 'Le' : JOUR_LABEL}">${esc(r.label)}</td>
+      ${ep ? '' : `<td class="num${r.smoothed ? ' smoothed' : ''}" data-label="${kind === 'a' ? 'Le' : JOUR_LABEL}">${esc(r.label)}</td>`}
       ${couple ? `<td class="num dyd" data-label="Part Dyd">${euro(dyd)}</td><td class="num meg" data-label="Part Meg">${euro(r.cents - dyd)}</td>` : ''}
       <td class="act">
         <button type="button" class="icon-btn" data-act="edit" aria-label="Modifier « ${esc(e.motif)} »" title="Modifier">${ICON_EDIT}</button>
@@ -533,27 +600,31 @@
   }
 
   function renderList(k) {
-    const panel = $('#panel-' + k);
-    const cols = k === 'couple' ? 6 : 4;
+    const panel = root(k);
+    const ep = isEp(k);
+    const cols = (ep ? 3 : 4) + (entOf(k) === 'couple' ? 2 : 0);
     const active = filtersActive(k);
 
-    ['m', 'a'].forEach((kind) => {
+    (ep ? ['m'] : ['m', 'a']).forEach((kind) => {
       const all = rowsFor(k, kind);
       const list = visibleRows(k, all);
-      const word = kind === 'm' ? 'mensuelle' : 'annuelle';
+      const what = ep ? 'épargne mensuelle' : kind === 'm' ? 'dépense mensuelle' : 'dépense annuelle';
+      const whats = ep ? 'épargnes mensuelles' : kind === 'm' ? 'dépenses mensuelles' : 'dépenses annuelles';
       $(`table[data-kind="${kind}"] tbody`, panel).innerHTML = list.length
         ? list.map((r) => rowHTML(k, r, kind)).join('')
-        : `<tr><td class="empty" colspan="${cols}">${all.length ? 'Aucune dépense ne correspond à la recherche.' : `Aucune dépense ${word} pour le moment.`}</td></tr>`;
+        : `<tr><td class="empty" colspan="${cols}">${all.length ? `Aucune ${ep ? 'épargne' : 'dépense'} ne correspond à la recherche.` : `Aucune ${what} pour le moment.`}</td></tr>`;
       $(`[data-count="${kind}"]`, panel).textContent = all.length ? (active ? ` · ${list.length} sur ${all.length}` : ` · ${all.length}`) : '';
       const ft = $(`[data-ft="${kind}"]`, panel);
       ft.hidden = !active || !all.length;
-      if (active) ft.textContent = `Total des dépenses ${word}s affichées : ` + euro(list.reduce((s, r) => s + r.cents, 0));
+      if (active) ft.textContent = `Total des ${whats} affichées : ` + euro(list.reduce((s, r) => s + r.cents, 0));
     });
 
-    $('.annual-block', panel).hidden = annualMode !== 'separe';
+    if (!ep) {
+      $('.annual-block', panel).hidden = annualMode !== 'separe';
+      $('[data-annual-mode]', panel).value = annualMode;
+    }
     $('.active-dot', panel).hidden = !active;
     $('.reset-filters', panel).hidden = !active;
-    $('[data-annual-mode]', panel).value = annualMode;
 
     // Indicateurs de tri
     const { sortBy, sortDir } = ui[k];
@@ -574,27 +645,43 @@
   function renderTotals(k) {
     const row = (label, cents, cls = '') => `<div class="t-row ${cls}"><dt>${label}</dt><dd>${euro(cents)}</dd></div>`;
     const group = (html) => `<dl class="t-group">${html}</dl>`;
-    const t = computeTotals(k);
+    const ent = entOf(k);
+    const n = noun(k);
     let html;
-    if (k === 'couple') {
-      html = group(row('Total des dépenses mensuelles du couple', t.month, 'grand')
-        + row('Dyd - Total des dépenses mensuelles dans le couple', t.monthDyd, 'dyd')
-        + row('Meg - Total des dépenses mensuelles dans le couple', t.monthMeg, 'meg'))
-        + group(row('Total des dépenses annuelles du couple', t.year, 'grand')
-        + row('Dyd - Total des dépenses annuelles dans le couple', t.yearDyd, 'dyd')
-        + row('Meg - Total des dépenses annuelles dans le couple', t.yearMeg, 'meg'));
+    let combined;
+    if (ent === 'couple') {
+      const t = computeTotals(k);
+      html = group(row(`Total des ${n} mensuelles du couple`, t.month, 'grand')
+        + row(`Dyd - Total des ${n} mensuelles dans le couple`, t.monthDyd, 'dyd')
+        + row(`Meg - Total des ${n} mensuelles dans le couple`, t.monthMeg, 'meg'))
+        + group(row(`Total des ${n} annuelles du couple`, t.year, 'grand')
+        + row(`Dyd - Total des ${n} annuelles dans le couple`, t.yearDyd, 'dyd')
+        + row(`Meg - Total des ${n} annuelles dans le couple`, t.yearMeg, 'meg'));
+      const a = computeTotals('couple');
+      const b = computeTotals('couple_ep');
+      combined = group(row('Total des dépenses et épargnes mensuelles du couple', a.month + b.month, 'combo')
+        + row('Dyd - Total des dépenses et épargnes mensuelles dans le couple', a.monthDyd + b.monthDyd, 'dyd')
+        + row('Meg - Total des dépenses et épargnes mensuelles dans le couple', a.monthMeg + b.monthMeg, 'meg'))
+        + group(row('Total des dépenses et épargnes annuelles du couple', a.year + b.year, 'combo')
+        + row('Dyd - Total des dépenses et épargnes annuelles dans le couple', a.yearDyd + b.yearDyd, 'dyd')
+        + row('Meg - Total des dépenses et épargnes annuelles dans le couple', a.yearMeg + b.yearMeg, 'meg'));
     } else {
-      const c = computeTotals('couple');
-      const cm = k === 'dyd' ? c.monthDyd : c.monthMeg;
-      const cy = k === 'dyd' ? c.yearDyd : c.yearMeg;
-      html = group(row('Total des dépenses mensuelles personnelles', t.month)
-        + row('Total des dépenses mensuelles dans le couple', cm)
-        + row('Total des dépenses mensuelles ' + WHO[k], t.month + cm, 'grand'))
-        + group(row('Total des dépenses annuelles personnelles', t.year)
-        + row('Total des dépenses annuelles dans le couple', cy)
-        + row('Total des dépenses annuelles ' + WHO[k], t.year + cy, 'grand'));
+      const t = personTotals(ent, isEp(k));
+      const who = WHO[ent];
+      html = group(row(`Total des ${n} mensuelles personnelles`, t.own.month)
+        + row(`Total des ${n} mensuelles dans le couple`, t.inMonth)
+        + row(`Total des ${n} mensuelles ${who}`, t.month, 'grand'))
+        + group(row(`Total des ${n} annuelles personnelles`, t.own.year)
+        + row(`Total des ${n} annuelles dans le couple`, t.inYear)
+        + row(`Total des ${n} annuelles ${who}`, t.year, 'grand'));
+      const a = personTotals(ent, false);
+      const b = personTotals(ent, true);
+      combined = group(row(`Total des dépenses et épargnes mensuelles ${who}`, a.month + b.month, 'combo')
+        + row(`Total des dépenses et épargnes annuelles ${who}`, a.year + b.year, 'combo'));
     }
-    $('#panel-' + k + ' .totals').innerHTML = html;
+    const panel = root(k);
+    $('.totals', panel).innerHTML = html;
+    $('.totals-combined', panel).innerHTML = '<p class="t-head">Dépenses + épargne</p>' + combined;
   }
 
   function renderShare() {
@@ -615,15 +702,27 @@
     renderShare();
   }
 
-  function showTab(k) {
-    activeTab = k;
+  function showTab(ent) {
+    activeTab = ent;
     $$('.tab').forEach((t) => {
-      const on = t.dataset.tab === k;
+      const on = t.dataset.tab === ent;
       t.setAttribute('aria-selected', String(on));
       t.tabIndex = on ? 0 : -1;
     });
-    LISTS.forEach((x) => { $('#panel-' + x).hidden = x !== k; });
-    try { localStorage.setItem(LS_TAB, k); } catch (_) { /* indisponible */ }
+    ENTITIES.forEach((x) => { $('#panel-' + x).hidden = x !== ent; });
+    try { localStorage.setItem(LS_TAB, ent); } catch (_) { /* indisponible */ }
+  }
+
+  function showSub(ent, sub) {
+    subTab[ent] = sub;
+    $$('.subtab', $('#panel-' + ent)).forEach((b) => {
+      const on = b.dataset.sub === sub;
+      b.setAttribute('aria-selected', String(on));
+      b.tabIndex = on ? 0 : -1;
+    });
+    root(ent).hidden = sub !== 'dep';
+    root(ent + '_ep').hidden = sub !== 'ep';
+    try { localStorage.setItem(LS_SUB, JSON.stringify(subTab)); } catch (_) { /* indisponible */ }
   }
 
   /* =========================================================
@@ -644,7 +743,7 @@
   /* =========================================================
    * Formulaire
    * ========================================================= */
-  function formOf(k) { return $('#panel-' + k + ' form.entry'); }
+  const formOf = (k) => $('form.entry', root(k));
 
   // Bascule entre dépense mensuelle et annuelle (convertit la valeur du 3e champ)
   function setFormType(k, type, convert = true) {
@@ -680,27 +779,36 @@
     $$('input', form).forEach((i) => { i.dataset.last = ''; i.removeAttribute('aria-invalid'); });
     $('.motif-count', form).textContent = '0/100';
     $('.form-msg', form).textContent = '';
-    $('.entry-title', form).hidden = true;
     $('.cancel-edit', form).hidden = true;
-    setSwitchLabels(form, false);
+    if (isEp(k)) {
+      $('.entry-title', form).textContent = 'Nouvelle épargne mensuelle';
+    } else {
+      $('.entry-title', form).hidden = true;
+      setSwitchLabels(form, false);
+    }
     form.classList.remove('editing');
   }
 
   function startEdit(k, id) {
     const e = state[k].find((x) => x.id === id);
     if (!e) return;
+    const ep = isEp(k);
     const form = formOf(k);
     ui[k].editing = id;
-    setFormType(k, e.freq, false);
+    if (!ep) setFormType(k, e.freq, false);
     setVal(form.motif, e.motif);
     setVal(form.montant, centsToInput(e.cents));
-    setVal(form.jour, e.jour === null ? '' : e.freq === 'a' ? dateText(e.jour, e.mois) : String(e.jour));
+    if (!ep) setVal(form.jour, e.jour === null ? '' : e.freq === 'a' ? dateText(e.jour, e.mois) : String(e.jour));
     $('.motif-count', form).textContent = e.motif.length + '/100';
     $('.form-msg', form).textContent = '';
     $$('input', form).forEach((i) => i.removeAttribute('aria-invalid'));
-    $('.entry-title', form).hidden = false;
+    if (ep) {
+      $('.entry-title', form).textContent = 'Modifier l\'épargne';
+    } else {
+      $('.entry-title', form).hidden = false;
+      setSwitchLabels(form, true);
+    }
     $('.cancel-edit', form).hidden = false;
-    setSwitchLabels(form, true);
     form.classList.add('editing');
     renderList(k);
     form.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -708,18 +816,19 @@
   }
 
   function submitEntry(k, form) {
-    const type = ui[k].formType;
+    const ep = isEp(k);
+    const type = ep ? 'm' : ui[k].formType;
     const motif = form.motif.value.trim();
     const cents = parseMontant(form.montant.value);
     let jour = null;
     let mois = null;
-    let dateOk;
-    if (type === 'a') {
+    let dateOk = true;
+    if (!ep && type === 'a') {
       const d = parseDate(form.jour.value);
       dateOk = d.ok;
       jour = d.jour;
       mois = d.mois;
-    } else {
+    } else if (!ep) {
       const j = parseJour(form.jour.value);
       dateOk = j.ok;
       jour = j.value;
@@ -727,7 +836,7 @@
     const errors = [];
     form.motif.setAttribute('aria-invalid', String(!motif));
     form.montant.setAttribute('aria-invalid', String(!cents));
-    form.jour.setAttribute('aria-invalid', String(!dateOk));
+    if (!ep) form.jour.setAttribute('aria-invalid', String(!dateOk));
     if (!motif) errors.push('Le motif est obligatoire.');
     if (!cents) errors.push('Le montant doit être un nombre positif (2 décimales maximum).');
     if (!dateOk) errors.push(type === 'a' ? 'La date doit être au format JJ/MM (ex. 13/04).' : 'Le jour du mois doit être un entier de 1 à 31.');
@@ -765,21 +874,26 @@
    * Import / export JSON
    * ========================================================= */
   function exportTab(k) {
+    const ep = isEp(k);
+    const ent = entOf(k);
+    const items = ep
+      ? state[k].map((e) => ({ motif: e.motif, montant: e.cents / 100 }))
+      : state[k].map((e) => (e.freq === 'a'
+        ? { motif: e.motif, montant: e.cents / 100, type: 'annuelle', date: e.jour === null ? null : dateText(e.jour, e.mois) }
+        : { motif: e.motif, montant: e.cents / 100, type: 'mensuelle', jour: e.jour }));
     const payload = {
       application: 'depenses-couple',
-      version: 2,
+      version: 3,
       onglet: k,
-      nomOnglet: TAB_LABEL[k],
+      nomOnglet: listLabel(k),
       exporteLe: new Date().toISOString(),
-      ...(k === 'couple' ? { partDyd: state.settings.partDyd, partMeg: 100 - state.settings.partDyd } : {}),
-      depenses: state[k].map((e) => (e.freq === 'a'
-        ? { motif: e.motif, montant: e.cents / 100, type: 'annuelle', date: e.jour === null ? null : dateText(e.jour, e.mois) }
-        : { motif: e.motif, montant: e.cents / 100, type: 'mensuelle', jour: e.jour }))
+      ...(ent === 'couple' ? { partDyd: state.settings.partDyd, partMeg: 100 - state.settings.partDyd } : {}),
+      [ep ? 'epargnes' : 'depenses']: items
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `depenses-${k}-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `${ep ? 'epargne' : 'depenses'}-${ent}-${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -787,6 +901,7 @@
   }
 
   async function importTab(k, file) {
+    const ep = isEp(k);
     let json;
     try {
       json = JSON.parse(await file.text());
@@ -794,55 +909,67 @@
       alert('Ce fichier n\'est pas un fichier .json valide.');
       return;
     }
-    const raw = Array.isArray(json) ? json : json && Array.isArray(json.depenses) ? json.depenses : null;
+    const raw = Array.isArray(json) ? json
+      : json && Array.isArray(json.epargnes) ? json.epargnes
+        : json && Array.isArray(json.depenses) ? json.depenses : null;
     if (!raw) {
-      alert('Aucune liste de dépenses trouvée dans ce fichier.');
+      alert(`Aucune liste ${ep ? 'd\'épargnes' : 'de dépenses'} trouvée dans ce fichier.`);
       return;
     }
     if (json && json.onglet && LISTS.includes(json.onglet) && json.onglet !== k
-      && !confirm(`Ce fichier provient de l'onglet « ${TAB_LABEL[json.onglet]} ». L'importer quand même dans « ${TAB_LABEL[k]} » ?`)) return;
+      && !confirm(`Ce fichier provient de « ${listLabel(json.onglet)} ». L'importer quand même dans « ${listLabel(k)} » ?`)) return;
 
-    const entries = raw.map((e) => cleanEntry(e, false)).filter(Boolean);
+    const entries = raw.map((e) => cleanEntry(e, false, ep)).filter(Boolean);
     const skipped = raw.length - entries.length;
-    if (state[k].length && !confirm(`Remplacer les ${state[k].length} dépense(s) actuelles de « ${TAB_LABEL[k]} » par les ${entries.length} dépense(s) du fichier ?`)) return;
+    const unit = ep ? 'épargne(s)' : 'dépense(s)';
+    if (state[k].length && !confirm(`Remplacer les ${state[k].length} ${unit} actuelles de « ${listLabel(k)} » par les ${entries.length} ${unit} du fichier ?`)) return;
 
     state[k] = entries;
     exitEdit(k);
     Store.save(k);
-    if (k === 'couple' && json && !Array.isArray(json)) {
+    if (entOf(k) === 'couple' && json && !Array.isArray(json)) {
       const p = validPart(json.partDyd);
       if (p !== null) { state.settings.partDyd = p; Store.save('settings'); }
     }
     renderAll();
-    toast(`${entries.length} dépense(s) importée(s)` + (skipped ? ` · ${skipped} ligne(s) invalide(s) ignorée(s)` : ''));
+    toast(`${entries.length} ${unit} importée(s)` + (skipped ? ` · ${skipped} ligne(s) invalide(s) ignorée(s)` : ''));
   }
 
   /* =========================================================
    * Construction de l'interface & événements
    * ========================================================= */
   function buildPanels() {
-    $('#panels').innerHTML = LISTS.map(panelHTML).join('');
+    $('#panels').innerHTML = ENTITIES.map(entityHTML).join('');
 
     LISTS.forEach((k) => {
-      const panel = $('#panel-' + k);
+      const panel = root(k);
       const form = $('form.entry', panel);
+      const ep = isEp(k);
 
       restrict(form.montant, RE_MONTANT);
-      attachDayOrDate(form.jour, () => ui[k].formType);
       restrict($('[data-f="m"]', panel), RE_MONTANT);
-      restrict($('[data-f="j"]', panel), RE_JOUR);
+      if (!ep) {
+        attachDayOrDate(form.jour, () => ui[k].formType);
+        restrict($('[data-f="j"]', panel), RE_JOUR);
+        $$('.type-switch button', form).forEach((b) => b.addEventListener('click', () => {
+          setFormType(k, b.dataset.type);
+          form.jour.focus();
+        }));
+        // Affichage des dépenses annuelles (commun à tous les onglets)
+        $('[data-annual-mode]', panel).addEventListener('change', (ev) => {
+          annualMode = ev.target.value === 'separe' ? 'separe' : 'lisser';
+          try { localStorage.setItem(LS_MODE, annualMode); } catch (_) { /* indisponible */ }
+          renderAll();
+        });
+      }
 
-      $$('.type-switch button', form).forEach((b) => b.addEventListener('click', () => {
-        setFormType(k, b.dataset.type);
-        form.jour.focus();
-      }));
       form.addEventListener('submit', (ev) => { ev.preventDefault(); submitEntry(k, form); });
       form.motif.addEventListener('input', () => { $('.motif-count', form).textContent = form.motif.value.length + '/100'; });
       $$('input', form).forEach((i) => i.addEventListener('input', () => i.removeAttribute('aria-invalid')));
       $('.cancel-edit', form).addEventListener('click', () => { exitEdit(k); renderList(k); });
       form.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && ui[k].editing) { exitEdit(k); renderList(k); } });
 
-      // Clic sur modifier / supprimer (tableaux mensuel et annuel)
+      // Clic sur modifier / supprimer
       panel.addEventListener('click', (ev) => {
         const btn = ev.target.closest('[data-act]');
         if (!btn) return;
@@ -862,13 +989,6 @@
         ui[k].f = emptyFilters();
         $$('[data-f]', panel).forEach((el) => setVal(el, ui[k].f[el.dataset.f]));
         renderList(k);
-      });
-
-      // Affichage des dépenses annuelles (commun aux trois onglets)
-      $('[data-annual-mode]', panel).addEventListener('change', (ev) => {
-        annualMode = ev.target.value === 'separe' ? 'separe' : 'lisser';
-        try { localStorage.setItem(LS_MODE, annualMode); } catch (_) { /* indisponible */ }
-        renderAll();
       });
 
       // Tri
@@ -897,6 +1017,20 @@
       if (window.matchMedia('(min-width: 641px)').matches) $('details.tools', panel).open = true;
     });
 
+    // Sous-onglets Dépenses / Épargne
+    ENTITIES.forEach((ent) => {
+      const subs = $$('.subtab', $('#panel-' + ent));
+      subs.forEach((b) => {
+        b.addEventListener('click', () => showSub(ent, b.dataset.sub));
+        b.addEventListener('keydown', (ev) => {
+          if (ev.key !== 'ArrowRight' && ev.key !== 'ArrowLeft') return;
+          const next = subTab[ent] === 'dep' ? 'ep' : 'dep';
+          showSub(ent, next);
+          $(`.subtab[data-sub="${next}"]`, $('#panel-' + ent)).focus();
+        });
+      });
+    });
+
     // Curseur de répartition
     const range = $('#share-range');
     range.addEventListener('input', () => {
@@ -911,13 +1045,13 @@
       Store.save('settings');
     });
 
-    // Onglets (clic + flèches du clavier)
+    // Onglets principaux (clic + flèches du clavier)
     $$('.tab').forEach((t) => {
       t.addEventListener('click', () => showTab(t.dataset.tab));
       t.addEventListener('keydown', (ev) => {
         if (ev.key !== 'ArrowRight' && ev.key !== 'ArrowLeft') return;
-        const i = LISTS.indexOf(activeTab);
-        const next = LISTS[(i + (ev.key === 'ArrowRight' ? 1 : LISTS.length - 1)) % LISTS.length];
+        const i = ENTITIES.indexOf(activeTab);
+        const next = ENTITIES[(i + (ev.key === 'ArrowRight' ? 1 : ENTITIES.length - 1)) % ENTITIES.length];
         showTab(next);
         $(`.tab[data-tab="${next}"]`).focus();
       });
@@ -925,13 +1059,14 @@
   }
 
   function enterApp() {
-    document.title = 'Dépenses du couple';
+    document.title = 'Comptes du couple';
     $('#login').hidden = true;
     $('#app').hidden = false;
     buildPanels();
     let tab = 'dyd';
     try { tab = localStorage.getItem(LS_TAB) || 'dyd'; } catch (_) { /* indisponible */ }
-    showTab(LISTS.includes(tab) ? tab : 'dyd');
+    showTab(ENTITIES.includes(tab) ? tab : 'dyd');
+    ENTITIES.forEach((ent) => showSub(ent, subTab[ent]));
     renderAll();
     setSync(REMOTE ? 'ok' : 'local');
 

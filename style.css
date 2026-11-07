@@ -464,3 +464,38 @@ table.expenses { width: 100%; border-collapse: collapse; font-variant-numeric: t
   .t-row { padding: 9px 10px; font-size: 14px; }
   .t-row dd { font-size: 15px; }
 }
+
+/* ---------- Sous-onglets Dépenses / Épargne ---------- */
+.subtabs { display: flex; gap: 6px; margin: 0 0 16px; }
+.subtab {
+  border: 1px solid var(--line-strong);
+  background: #fff;
+  padding: 8px 20px;
+  border-radius: 999px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+.subtab:hover { color: var(--ink); }
+.subtab[aria-selected="true"] { background: var(--ink); border-color: var(--ink); color: #fff; }
+.subtab:focus-visible { outline: 2px solid var(--dyd); outline-offset: 2px; }
+.content-col { min-width: 0; }
+
+.fields-2 { grid-template-columns: minmax(0, 2.2fr) minmax(0, 1fr); }
+
+/* ---------- Total dépenses + épargne ---------- */
+.totals-combined {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line-strong);
+}
+.t-head { margin: 0; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.t-row.combo { background: #fff; border: 1.5px solid var(--ink); }
+
+@media (max-width: 640px) {
+  .subtabs { display: grid; grid-template-columns: 1fr 1fr; }
+  .subtab { padding: 8px 10px; }
+  .fields-2 > .field { grid-column: 1 / -1; }
+}

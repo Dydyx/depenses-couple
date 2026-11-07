@@ -5,12 +5,15 @@
 
 create extension if not exists pgcrypto with schema extensions;
 
--- Données de l'appli (une ligne par onglet + une ligne de réglages)
+-- Données de l'appli (une ligne par liste : dyd, meg, couple, dyd_ep, meg_ep, couple_ep, settings…)
 create table if not exists public.app_data (
-  key        text primary key check (key in ('dyd', 'meg', 'couple', 'settings')),
+  key        text primary key,
   value      jsonb not null,
   updated_at timestamptz not null default now()
 );
+-- Clés autorisées : minuscules et « _ » (le script peut être relancé sans risque)
+alter table public.app_data drop constraint if exists app_data_key_check;
+alter table public.app_data add constraint app_data_key_check check (key ~ '^[a-z][a-z_]{0,30}$');
 
 -- Mot de passe (stocké haché avec bcrypt, jamais en clair)
 create table if not exists public.app_secret (
@@ -23,10 +26,10 @@ alter table public.app_data   enable row level security;
 alter table public.app_secret enable row level security;
 revoke all on public.app_data, public.app_secret from anon, authenticated;
 
--- Mot de passe initial : "coucou"
+-- Mot de passe initial : "coucou" (un mot de passe déjà défini n'est pas écrasé)
 insert into public.app_secret (id, pwd_hash)
 values (1, extensions.crypt('coucou', extensions.gen_salt('bf')))
-on conflict (id) do update set pwd_hash = excluded.pwd_hash;
+on conflict (id) do nothing;
 
 -- Vérification du mot de passe (interne)
 create or replace function public.app_check(pwd text)
@@ -64,7 +67,7 @@ begin
     perform pg_sleep(1);
     raise exception 'denied' using errcode = '28P01';
   end if;
-  if k not in ('dyd', 'meg', 'couple', 'settings') then
+  if k is null or k !~ '^[a-z][a-z_]{0,30}$' then
     raise exception 'bad key';
   end if;
   if pg_column_size(v) > 1000000 then

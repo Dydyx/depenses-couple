@@ -1,12 +1,12 @@
-# Dépenses du couple
+# Comptes du couple
 
-Petite appli web (HTML/CSS/JS, sans dépendance) pour gérer les dépenses de Dyd, de Meg et du couple.
+Petite appli web (HTML/CSS/JS, sans dépendance) pour gérer les dépenses et l'épargne de Dyd, de Meg et du couple.
 Hébergée gratuitement sur GitHub Pages, données stockées dans une base Supabase (gratuite).
 
 ## Fonctionnement
 
 - Page d'accueil blanche : mot de passe + « Valider ». Rien ne s'affiche si le mot de passe est faux.
-- 3 onglets : **Dépenses Dyd**, **Dépenses Meg**, **Dépenses du couple**.
+- 3 onglets : **Comptes Dyd**, **Comptes Meg**, **Comptes du couple**, chacun avec deux sous-onglets **Dépenses** et **Épargne**.
 - Ajout (Motif, Montant, Le ... du mois), modification ✏️ et suppression 🗑 en un clic (avec « Annuler »).
 - Tri par colonne (clic sur l'en-tête), recherche/filtre sur chaque champ.
 - Totaux en bas de chaque tableau ; les onglets personnels reprennent la part du couple.
